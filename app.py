@@ -8,23 +8,32 @@ from difflib import SequenceMatcher
 import re
 from nltk.corpus import stopwords
 import nltk
+import pandas as pd
 
-# Download NLTK stopwords
 nltk.download("stopwords")
 stop_words = set(stopwords.words("english"))
 
 def preprocess_text(text):
     """Preprocess text: lowercase, remove punctuation, remove stopwords."""
-    text = text.lower()  # Convert to lowercase
-    text = re.sub(r"[\W_]+", " ", text)  # Remove punctuation and special characters
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r"[\W_]+", " ", text)
     words = text.split()
     filtered_words = [word for word in words if word not in stop_words]
     return " ".join(filtered_words)
 
 def extract_text_from_pdf(file):
     reader = PdfReader(file)
-    text = " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
-    return text
+    text = ""
+    for page in reader.pages:
+        try:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + " "
+        except Exception as e:
+            st.error(f"Error extracting text from page: {e}")
+    return text.strip()
 
 def extract_text_from_docx(file):
     doc = Document(file)
@@ -48,6 +57,8 @@ def process_file(file):
         return None
 
 def calculate_similarity(text1, text2):
+    if not text1 or not text2:
+        return 0.0
     vectorizer = TfidfVectorizer().fit_transform([text1, text2])
     vectors = vectorizer.toarray()
     return cosine_similarity(vectors)[0, 1]
@@ -58,7 +69,7 @@ def highlight_similarities(text1, text2):
     highlighted_text1 = ""
     highlighted_text2 = ""
 
-    for i, match in enumerate(matches):
+    for match in matches:
         start1, start2, length = match
         if length > 0:
             match_text1 = text1[start1:start1+length]
@@ -68,36 +79,52 @@ def highlight_similarities(text1, text2):
 
     return highlighted_text1, highlighted_text2
 
-st.title("Document Plagiarism Checker")
+st.title("Assignment Plagiarism Checker")
 
-uploaded_file1 = st.file_uploader("Upload the first document", type=["pdf", "docx", "pptx"])
-uploaded_file2 = st.file_uploader("Upload the second document", type=["pdf", "docx", "pptx"])
+uploaded_files = st.file_uploader("Upload student assignments", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
 
-if uploaded_file1 and uploaded_file2:
+if uploaded_files:
     with st.spinner("Processing files..."):
-        text1 = process_file(uploaded_file1)
-        text2 = process_file(uploaded_file2)
-
-        if text1 and text2:
-            # Preprocess text
-            preprocessed_text1 = preprocess_text(text1)
-            preprocessed_text2 = preprocess_text(text2)
-
-            # Calculate similarity
-            similarity_score = calculate_similarity(preprocessed_text1, preprocessed_text2)
-
-            # Highlight matches
-            highlighted_text1, highlighted_text2 = highlight_similarities(text1, text2)
-
-            st.write(f"**Similarity Score:** {similarity_score * 100:.2f}%")
-            if similarity_score > 0.8:
-                st.warning("The documents are highly similar!")
+        assignments = {}
+        for file in uploaded_files:
+            text = process_file(file)
+            if text:
+                preprocessed_text = preprocess_text(text)
+                if preprocessed_text:
+                    assignments[file.name] = preprocessed_text
+                else:
+                    st.warning(f"File '{file.name}' contains no usable text after preprocessing.")
             else:
-                st.success("The documents are not significantly similar.")
+                st.warning(f"File '{file.name}' could not be processed.")
 
-            st.subheader("Text Comparison")
-            st.markdown("**Document 1 Highlighted Matches:**")
-            st.markdown(f"<div style='overflow:auto; background-color: #f8f9fa; padding: 10px;'>{highlighted_text1}</div>", unsafe_allow_html=True)
+        if not assignments:
+            st.error("No valid text was extracted from the uploaded files.")
+        else:
+            similarity_results = []
+            assignment_names = list(assignments.keys())
+            for i in range(len(assignment_names)):
+                for j in range(i + 1, len(assignment_names)):
+                    name1 = assignment_names[i]
+                    name2 = assignment_names[j]
+                    similarity_score = calculate_similarity(assignments[name1], assignments[name2])
+                    similarity_results.append({
+                        "Assignment 1": name1,
+                        "Assignment 2": name2,
+                        "Similarity Score": similarity_score * 100
+                    })
 
-            st.markdown("**Document 2 Highlighted Matches:**")
-            st.markdown(f"<div style='overflow:auto; background-color: #f8f9fa; padding: 10px;'>{highlighted_text2}</div>", unsafe_allow_html=True)
+            results_df = pd.DataFrame(similarity_results)
+            if not results_df.empty:
+                st.subheader("Plagiarism Report")
+                st.write(results_df)
+
+                high_similarity_threshold = st.slider("Set similarity threshold", min_value=50, max_value=100, value=80, step=5)
+                high_similarity_pairs = results_df[results_df["Similarity Score"] >= high_similarity_threshold]
+
+                if not high_similarity_pairs.empty:
+                    st.warning("High similarity detected in the following assignments:")
+                    st.write(high_similarity_pairs)
+                else:
+                    st.success("No significantly similar assignments detected.")
+            else:
+                st.error("No similarity scores were calculated. Please check your input files.")
