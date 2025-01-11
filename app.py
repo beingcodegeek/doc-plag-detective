@@ -12,6 +12,7 @@ import pandas as pd
 import zipfile
 import os
 from sentence_transformers import SentenceTransformer
+import hashlib
 import numpy as np
 
 nltk.download("stopwords")
@@ -70,6 +71,17 @@ def calculate_similarity(text1, text2):
     embeddings = model.encode([text1, text2])
     return cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
 
+def generate_fingerprint(text, k=5):
+    """Generate a fingerprint for the text using shingles (k-grams)."""
+    shingles = [text[i:i + k] for i in range(len(text) - k + 1)]
+    hashed_shingles = [hashlib.md5(shingle.encode('utf-8')).hexdigest() for shingle in shingles]
+    return set(hashed_shingles)
+
+def check_citations(text):
+    """Basic citation pattern matching."""
+    citation_pattern = r"\b(?:[A-Za-z]+(?:,?\s+[A-Za-z]+)*\s+\d{4})\b"
+    return re.findall(citation_pattern, text)
+
 def process_zip_file(zip_file):
     """Extract files from a ZIP archive and process them."""
     extracted_files = []
@@ -122,11 +134,30 @@ if uploaded_files:
                 for j in range(i + 1, len(assignment_names)):
                     name1 = assignment_names[i]
                     name2 = assignment_names[j]
+
+                    # Calculate semantic similarity using Sentence-BERT
                     similarity_score = calculate_similarity(assignments[name1], assignments[name2])
+
+                    # Generate fingerprints for both assignments
+                    fingerprint1 = generate_fingerprint(assignments[name1])
+                    fingerprint2 = generate_fingerprint(assignments[name2])
+                    fingerprint_similarity = len(fingerprint1.intersection(fingerprint2)) / len(fingerprint1.union(fingerprint2))
+
+                    # Check for citations in both assignments
+                    citations1 = check_citations(assignments[name1])
+                    citations2 = check_citations(assignments[name2])
+                    citation_similarity = 1 if len(citations1) == len(citations2) else 0
+
+                    # Combine similarities
+                    combined_similarity = 0.5 * similarity_score + 0.25 * fingerprint_similarity + 0.25 * citation_similarity
+
                     similarity_results.append({
                         "Assignment 1": name1,
                         "Assignment 2": name2,
-                        "Similarity Score": similarity_score * 100
+                        "Semantic Similarity": similarity_score * 100,
+                        "Fingerprint Similarity": fingerprint_similarity * 100,
+                        "Citation Similarity": citation_similarity * 100,
+                        "Combined Similarity": combined_similarity * 100
                     })
 
             results_df = pd.DataFrame(similarity_results)
@@ -135,7 +166,7 @@ if uploaded_files:
                 st.write(results_df)
 
                 high_similarity_threshold = st.slider("Set similarity threshold", min_value=50, max_value=100, value=80, step=5)
-                high_similarity_pairs = results_df[results_df["Similarity Score"] >= high_similarity_threshold]
+                high_similarity_pairs = results_df[results_df["Combined Similarity"] >= high_similarity_threshold]
 
                 if not high_similarity_pairs.empty:
                     st.warning("High similarity detected in the following assignments:")
