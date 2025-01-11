@@ -9,9 +9,16 @@ import re
 from nltk.corpus import stopwords
 import nltk
 import pandas as pd
+import zipfile
+import os
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 nltk.download("stopwords")
 stop_words = set(stopwords.words("english"))
+
+# Load the pre-trained Sentence-BERT model
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def preprocess_text(text):
     """Preprocess text: lowercase, remove punctuation, remove stopwords."""
@@ -57,45 +64,54 @@ def process_file(file):
         return None
 
 def calculate_similarity(text1, text2):
+    """Calculate semantic similarity using Sentence-BERT."""
     if not text1 or not text2:
         return 0.0
-    vectorizer = TfidfVectorizer().fit_transform([text1, text2])
-    vectors = vectorizer.toarray()
-    return cosine_similarity(vectors)[0, 1]
+    embeddings = model.encode([text1, text2])
+    return cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
 
-def highlight_similarities(text1, text2):
-    matcher = SequenceMatcher(None, text1, text2)
-    matches = matcher.get_matching_blocks()
-    highlighted_text1 = ""
-    highlighted_text2 = ""
-
-    for match in matches:
-        start1, start2, length = match
-        if length > 0:
-            match_text1 = text1[start1:start1+length]
-            match_text2 = text2[start2:start2+length]
-            highlighted_text1 += f"<span style='background-color: yellow;'>{match_text1}</span> "
-            highlighted_text2 += f"<span style='background-color: yellow;'>{match_text2}</span> "
-
-    return highlighted_text1, highlighted_text2
+def process_zip_file(zip_file):
+    """Extract files from a ZIP archive and process them."""
+    extracted_files = []
+    with zipfile.ZipFile(zip_file, "r") as zip_ref:
+        zip_ref.extractall("extracted_files")
+        for root, _, files in os.walk("extracted_files"):
+            for file in files:
+                extracted_files.append(os.path.join(root, file))
+    return extracted_files
 
 st.title("Assignment Plagiarism Checker")
 
-uploaded_files = st.file_uploader("Upload student assignments", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload student assignments (PDF, DOCX, PPTX, or ZIP)", type=["pdf", "docx", "pptx", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
     with st.spinner("Processing files..."):
         assignments = {}
         for file in uploaded_files:
-            text = process_file(file)
-            if text:
-                preprocessed_text = preprocess_text(text)
-                if preprocessed_text:
-                    assignments[file.name] = preprocessed_text
-                else:
-                    st.warning(f"File '{file.name}' contains no usable text after preprocessing.")
+            if file.name.endswith(".zip"):
+                extracted_files = process_zip_file(file)
+                for extracted_file in extracted_files:
+                    with open(extracted_file, "rb") as ef:
+                        file_name = os.path.basename(extracted_file)
+                        text = process_file(ef)
+                        if text:
+                            preprocessed_text = preprocess_text(text)
+                            if preprocessed_text:
+                                assignments[file_name] = preprocessed_text
+                            else:
+                                st.warning(f"File '{file_name}' contains no usable text after preprocessing.")
+                        else:
+                            st.warning(f"File '{file_name}' could not be processed.")
             else:
-                st.warning(f"File '{file.name}' could not be processed.")
+                text = process_file(file)
+                if text:
+                    preprocessed_text = preprocess_text(text)
+                    if preprocessed_text:
+                        assignments[file.name] = preprocessed_text
+                    else:
+                        st.warning(f"File '{file.name}' contains no usable text after preprocessing.")
+                else:
+                    st.warning(f"File '{file.name}' could not be processed.")
 
         if not assignments:
             st.error("No valid text was extracted from the uploaded files.")
