@@ -5,3 +5,4 @@ python-pptx
 scikit-learn
 nltk
 pandas
+sentence-transformers
