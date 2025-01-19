@@ -1,0 +1,8 @@
+# Ignore extracted files folder
+/extracted_files/
+
+# Ignore temp files folder
+/temp_files/
+
+# Ignore tempfiles.zip
+/temp_files.zip
