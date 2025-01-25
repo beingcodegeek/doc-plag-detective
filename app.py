@@ -4,54 +4,35 @@ from docx import Document
 from pptx import Presentation
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from difflib import SequenceMatcher
 import re
-from nltk.corpus import stopwords
-import nltk
 import pandas as pd
 import zipfile
 import os
-from sentence_transformers import SentenceTransformer
-import hashlib
-import numpy as np
-
-nltk.download("stopwords")
-stop_words = set(stopwords.words("english"))
-
-# Load the pre-trained Sentence-BERT model
-model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def preprocess_text(text):
-    """Preprocess text: lowercase, remove punctuation, remove stopwords."""
+    """Preprocess text: lowercase, remove punctuation, and extra whitespace."""
     if not text:
         return ""
     text = text.lower()
     text = re.sub(r"[\W_]+", " ", text)
-    words = text.split()
-    filtered_words = [word for word in words if word not in stop_words]
-    return " ".join(filtered_words)
+    return " ".join(text.split())
 
 def extract_text_from_pdf(file):
     reader = PdfReader(file)
     text = ""
     for page in reader.pages:
-        try:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + " "
-        except Exception as e:
-            st.error(f"Error extracting text from page: {e}")
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + " "
     return text.strip()
 
 def extract_text_from_docx(file):
     doc = Document(file)
-    text = " ".join([para.text for para in doc.paragraphs])
-    return text
+    return " ".join([para.text for para in doc.paragraphs])
 
 def extract_text_from_pptx(file):
     presentation = Presentation(file)
-    text = " ".join([shape.text for slide in presentation.slides for shape in slide.shapes if hasattr(shape, "text")])
-    return text
+    return " ".join([shape.text for slide in presentation.slides for shape in slide.shapes if hasattr(shape, "text")])
 
 def process_file(file):
     if file.name.endswith(".pdf"):
@@ -63,19 +44,6 @@ def process_file(file):
     else:
         st.error("Unsupported file format. Please upload a PDF, DOCX, or PPTX file.")
         return None
-
-def calculate_similarity(text1, text2):
-    """Calculate semantic similarity using Sentence-BERT."""
-    if not text1 or not text2:
-        return 0.0
-    embeddings = model.encode([text1, text2])
-    return cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
-
-def generate_fingerprint(text, k=5):
-    """Generate a fingerprint for the text using shingles (k-grams)."""
-    shingles = [text[i:i + k] for i in range(len(text) - k + 1)]
-    hashed_shingles = [hashlib.md5(shingle.encode('utf-8')).hexdigest() for shingle in shingles]
-    return set(hashed_shingles)
 
 def process_zip_file(zip_file):
     """Extract files from a ZIP archive and process them."""
@@ -102,51 +70,30 @@ if uploaded_files:
                         file_name = os.path.basename(extracted_file)
                         text = process_file(ef)
                         if text:
-                            preprocessed_text = preprocess_text(text)
-                            if preprocessed_text:
-                                assignments[file_name] = preprocessed_text
-                            else:
-                                st.warning(f"File '{file_name}' contains no usable text after preprocessing.")
-                        else:
-                            st.warning(f"File '{file_name}' could not be processed.")
+                            assignments[file_name] = preprocess_text(text)
             else:
                 text = process_file(file)
                 if text:
-                    preprocessed_text = preprocess_text(text)
-                    if preprocessed_text:
-                        assignments[file.name] = preprocessed_text
-                    else:
-                        st.warning(f"File '{file.name}' contains no usable text after preprocessing.")
-                else:
-                    st.warning(f"File '{file.name}' could not be processed.")
+                    assignments[file.name] = preprocess_text(text)
 
         if not assignments:
             st.error("No valid text was extracted from the uploaded files.")
         else:
-            similarity_results = []
             assignment_names = list(assignments.keys())
+            assignment_texts = list(assignments.values())
+
+            # Compute pairwise similarities
+            vectorizer = TfidfVectorizer()
+            tfidf_matrix = vectorizer.fit_transform(assignment_texts)
+            similarity_matrix = cosine_similarity(tfidf_matrix)
+
+            similarity_results = []
             for i in range(len(assignment_names)):
                 for j in range(i + 1, len(assignment_names)):
-                    name1 = assignment_names[i]
-                    name2 = assignment_names[j]
-
-                    # Calculate semantic similarity using Sentence-BERT
-                    similarity_score = calculate_similarity(assignments[name1], assignments[name2])
-
-                    # Generate fingerprints for both assignments
-                    fingerprint1 = generate_fingerprint(assignments[name1])
-                    fingerprint2 = generate_fingerprint(assignments[name2])
-                    fingerprint_similarity = len(fingerprint1.intersection(fingerprint2)) / len(fingerprint1.union(fingerprint2))
-
-                    # Combine similarities
-                    combined_similarity = 0.75 * similarity_score + 0.25 * fingerprint_similarity
-
                     similarity_results.append({
-                        "Assignment 1": name1,
-                        "Assignment 2": name2,
-                        "Semantic Similarity": similarity_score * 100,
-                        "Fingerprint Similarity": fingerprint_similarity * 100,
-                        "Combined Similarity": combined_similarity * 100
+                        "Assignment 1": assignment_names[i],
+                        "Assignment 2": assignment_names[j],
+                        "Similarity (%)": similarity_matrix[i, j] * 100
                     })
 
             results_df = pd.DataFrame(similarity_results)
@@ -155,7 +102,7 @@ if uploaded_files:
                 st.write(results_df)
 
                 high_similarity_threshold = st.slider("Set similarity threshold", min_value=50, max_value=100, value=80, step=5)
-                high_similarity_pairs = results_df[results_df["Combined Similarity"] >= high_similarity_threshold]
+                high_similarity_pairs = results_df[results_df["Similarity (%)"] >= high_similarity_threshold]
 
                 if not high_similarity_pairs.empty:
                     st.warning("High similarity detected in the following assignments:")
