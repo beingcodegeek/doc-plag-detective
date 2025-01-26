@@ -1,113 +1,96 @@
-import streamlit as st
-from PyPDF2 import PdfReader
+import os
+import re
+import zipfile
+import hashlib
+from difflib import SequenceMatcher
+from flask import Flask, request, jsonify
+import fitz  # PyMuPDF for PDF processing
 from docx import Document
 from pptx import Presentation
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import re
-import pandas as pd
-import zipfile
-import os
+
+app = Flask(__name__)
 
 def preprocess_text(text):
-    """Preprocess text: lowercase, remove punctuation, and extra whitespace."""
+    """Lowercase and remove punctuation."""
     if not text:
         return ""
     text = text.lower()
     text = re.sub(r"[\W_]+", " ", text)
-    return " ".join(text.split())
+    return text
 
 def extract_text_from_pdf(file):
-    reader = PdfReader(file)
+    """Extract text from PDF using PyMuPDF."""
     text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + " "
+    pdf_document = fitz.open(stream=file.read(), filetype="pdf")
+    for page in pdf_document:
+        text += page.get_text()
     return text.strip()
 
 def extract_text_from_docx(file):
+    """Extract text from DOCX files."""
     doc = Document(file)
     return " ".join([para.text for para in doc.paragraphs])
 
 def extract_text_from_pptx(file):
+    """Extract text from PPTX files."""
     presentation = Presentation(file)
     return " ".join([shape.text for slide in presentation.slides for shape in slide.shapes if hasattr(shape, "text")])
 
-def process_file(file):
-    if file.name.endswith(".pdf"):
+def process_file(file, filename):
+    """Process supported file types."""
+    if filename.endswith(".pdf"):
         return extract_text_from_pdf(file)
-    elif file.name.endswith(".docx"):
+    elif filename.endswith(".docx"):
         return extract_text_from_docx(file)
-    elif file.name.endswith(".pptx"):
+    elif filename.endswith(".pptx"):
         return extract_text_from_pptx(file)
-    else:
-        st.error("Unsupported file format. Please upload a PDF, DOCX, or PPTX file.")
-        return None
+    return None
 
-def process_zip_file(zip_file):
-    """Extract files from a ZIP archive and process them."""
-    extracted_files = []
-    with zipfile.ZipFile(zip_file, "r") as zip_ref:
-        zip_ref.extractall("extracted_files")
-        for root, _, files in os.walk("extracted_files"):
-            for file in files:
-                extracted_files.append(os.path.join(root, file))
-    return extracted_files
+def generate_fingerprint(text, k=5):
+    """Generate a fingerprint for the text using k-grams."""
+    shingles = [text[i:i + k] for i in range(len(text) - k + 1)]
+    hashed_shingles = [hashlib.md5(shingle.encode("utf-8")).hexdigest() for shingle in shingles]
+    return set(hashed_shingles)
 
-st.title("Assignment Plagiarism Checker")
+@app.route('/upload', methods=['POST'])
+def upload_files():
+    if 'files[]' not in request.files:
+        return jsonify({"error": "No files uploaded"}), 400
+    
+    uploaded_files = request.files.getlist('files[]')
+    assignments = {}
 
-uploaded_files = st.file_uploader("Upload student assignments (PDF, DOCX, PPTX, or ZIP)", type=["pdf", "docx", "pptx", "zip"], accept_multiple_files=True)
-
-if uploaded_files:
-    with st.spinner("Processing files..."):
-        assignments = {}
-        for file in uploaded_files:
-            if file.name.endswith(".zip"):
-                extracted_files = process_zip_file(file)
-                for extracted_file in extracted_files:
-                    with open(extracted_file, "rb") as ef:
-                        file_name = os.path.basename(extracted_file)
-                        text = process_file(ef)
-                        if text:
-                            assignments[file_name] = preprocess_text(text)
-            else:
-                text = process_file(file)
-                if text:
-                    assignments[file.name] = preprocess_text(text)
-
-        if not assignments:
-            st.error("No valid text was extracted from the uploaded files.")
+    for file in uploaded_files:
+        filename = file.filename
+        if filename.endswith(".zip"):
+            with zipfile.ZipFile(file, 'r') as zip_ref:
+                zip_ref.extractall("extracted_files")
+                for root, _, files in os.walk("extracted_files"):
+                    for extracted_file in files:
+                        with open(os.path.join(root, extracted_file), "rb") as ef:
+                            text = process_file(ef, extracted_file)
+                            if text:
+                                assignments[extracted_file] = preprocess_text(text)
         else:
-            assignment_names = list(assignments.keys())
-            assignment_texts = list(assignments.values())
+            text = process_file(file, filename)
+            if text:
+                assignments[filename] = preprocess_text(text)
+    
+    # Check for similarities
+    results = []
+    assignment_names = list(assignments.keys())
+    for i in range(len(assignment_names)):
+        for j in range(i + 1, len(assignment_names)):
+            name1 = assignment_names[i]
+            name2 = assignment_names[j]
+            
+            fingerprint1 = generate_fingerprint(assignments[name1])
+            fingerprint2 = generate_fingerprint(assignments[name2])
+            similarity = len(fingerprint1.intersection(fingerprint2)) / len(fingerprint1.union(fingerprint2)) * 100
+            
+            results.append({"Assignment 1": name1, "Assignment 2": name2, "Similarity (%)": round(similarity, 2)})
 
-            # Compute pairwise similarities
-            vectorizer = TfidfVectorizer()
-            tfidf_matrix = vectorizer.fit_transform(assignment_texts)
-            similarity_matrix = cosine_similarity(tfidf_matrix)
+    return jsonify({"results": results})
 
-            similarity_results = []
-            for i in range(len(assignment_names)):
-                for j in range(i + 1, len(assignment_names)):
-                    similarity_results.append({
-                        "Assignment 1": assignment_names[i],
-                        "Assignment 2": assignment_names[j],
-                        "Similarity (%)": similarity_matrix[i, j] * 100
-                    })
-
-            results_df = pd.DataFrame(similarity_results)
-            if not results_df.empty:
-                st.subheader("Plagiarism Report")
-                st.write(results_df)
-
-                high_similarity_threshold = st.slider("Set similarity threshold", min_value=50, max_value=100, value=80, step=5)
-                high_similarity_pairs = results_df[results_df["Similarity (%)"] >= high_similarity_threshold]
-
-                if not high_similarity_pairs.empty:
-                    st.warning("High similarity detected in the following assignments:")
-                    st.write(high_similarity_pairs)
-                else:
-                    st.success("No significantly similar assignments detected.")
-            else:
-                st.error("No similarity scores were calculated. Please check your input files.")
+if __name__ == '__main__':
+    app.run(debug=True)
