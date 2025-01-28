@@ -1,19 +1,18 @@
 import os
 import re
-import zipfile
 import hashlib
-from difflib import SequenceMatcher
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import fitz  # PyMuPDF for PDF processing
 from docx import Document
 from pptx import Presentation
+from sklearn.feature_extraction.text import CountVectorizer
+import numpy as np
 import requests
 
 app = Flask(__name__)
 CORS(app)
 TEMP_DIR = "temp_files"
-ZIP_FILE_PATH = "temp_files.zip"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 def preprocess_text(text):
@@ -52,21 +51,36 @@ def process_file(file, filename):
         return extract_text_from_pptx(file)
     return None
 
-def generate_fingerprint(text, k=5):
-    """Generate a fingerprint for the text using k-grams."""
-    shingles = [text[i:i + k] for i in range(len(text) - k + 1)]
-    hashed_shingles = [hashlib.md5(shingle.encode("utf-8")).hexdigest() for shingle in shingles]
-    return set(hashed_shingles)
+def cosine_similarity(text1, text2):
+    """Calculate the cosine similarity between two texts."""
+    vectorizer = CountVectorizer()
+    vectors = vectorizer.fit_transform([text1, text2]).toarray()
+    dot_product = np.dot(vectors[0], vectors[1])
+    magnitude1 = np.linalg.norm(vectors[0])
+    magnitude2 = np.linalg.norm(vectors[1])
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0
+    cosine_sim = dot_product / (magnitude1 * magnitude2)
+    return cosine_sim
+
+def jaccard_similarity(text1, text2):
+    """Calculate Jaccard similarity between two texts."""
+    set1 = set(text1.split())
+    set2 = set(text2.split())
+    intersection = len(set1.intersection(set2))
+    union = len(set1.union(set2))
+    return intersection / union if union != 0 else 0
 
 @app.route('/upload', methods=['POST'])
-def upload_files():
-    file_details = request.json.get('fileDetails', [])
-    # print(file_details)
-    if 'fileDetails' not in request.json:
+def upload():
+    try:
+        file_details = request.json.get('fileDetails', [])
+        if 'fileDetails' not in request.json:
             return jsonify({"success": False, "message": "Invalid request data"}), 400
-    file_paths = []
-    files={}
-    for file in file_details:
+
+        file_paths = []
+        files = {}
+        for file in file_details:
             student_id = file.get('studentId')
             file_url = file.get('fileUrl')
 
@@ -84,35 +98,52 @@ def upload_files():
 
             else:
                 print(f"Failed to download file from: {file_url}")
-  
-    uploaded_files = []
-    assignments = {}
-    for file in file_paths:
-        uploaded_files.append(file)
-
-    for file in uploaded_files:
-        with open(file, "rb") as f:
-            text = process_file(f, file)
-            if text:
-                assignments[os.path.basename(file)] = preprocess_text(text)
-            else:
-                text = process_file(file, file)
     
-    # Check for similarities
-    results = []
-    assignment_names = list(assignments.keys())
-    for i in range(len(assignment_names)):
-        for j in range(i + 1, len(assignment_names)):
-            name1 = assignment_names[i]
-            name2 = assignment_names[j]
+        uploaded_files = []
+        assignments = {}
+        for file in file_paths:
+            uploaded_files.append(file)
 
-            fingerprint1 = generate_fingerprint(assignments[name1])
-            fingerprint2 = generate_fingerprint(assignments[name2])
-            similarity = len(fingerprint1.intersection(fingerprint2)) / len(fingerprint1.union(fingerprint2)) * 100
-            
-            results.append({"Assignment 1": name1, "Assignment 2": name2, "Similarity (%)": round(similarity, 2)})
-
-    return jsonify({"results": results})
+        for file in uploaded_files:
+            with open(file, "rb") as f:
+                text = process_file(f, file)
+                if text:
+                    assignments[os.path.basename(file)] = preprocess_text(text)
+                else:
+                    text = process_file(file, file)
         
+        # Calculate similarities
+        result = []
+        assignment_names = list(assignments.keys())
+        for i in range(len(assignment_names)):
+            for j in range(i + 1, len(assignment_names)):
+                name1 = assignment_names[i]
+                name2 = assignment_names[j]
+
+                # Calculate Cosine Similarity
+                cosine_sim = cosine_similarity(assignments[name1], assignments[name2])
+                print(cosine_sim)
+                # Calculate Jaccard Similarity
+                jaccard_sim = jaccard_similarity(assignments[name1], assignments[name2])
+
+                # Combine both similarities into a final combined score
+                combined_sim = (cosine_sim + jaccard_sim) / 2
+
+                result.append({
+                    "studentId1": files[name1],
+                    "studentId2": files[name2],
+                    "Assignment1": name1,
+                    "Assignment2": name2,
+                    "Cosine Similarity (%)": round(float(cosine_sim) * 100, 2),
+                    "Jaccard Similarity (%)": round(float(jaccard_sim) * 100, 2),
+                    "Combined Similarity (%)": round(float(combined_sim) * 100, 2)
+                })
+         
+        return jsonify({"success": True, "results": result})
+    
+    except Exception as e:
+        print(e)
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(port=8081)
